@@ -1,0 +1,8 @@
+{
+  "name": "slack-receptor",
+  "version": "1.0.0",
+  "description": "Receptor de interacciones de Slack para aprobaciones de acceso IT",
+  "dependencies": {
+    "googleapis": "^144.0.0"
+  }
+}
