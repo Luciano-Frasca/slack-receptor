@@ -164,10 +164,9 @@ export default async function handler(req, res) {
       let comment = '';
       try { comment = payload.view.state.values['c']['txt'].value || ''; } catch (e) {}
 
-      // Respondemos YA a Slack para cerrar el modal.
-      res.status(200).json({ response_action: 'clear' });
-
-      // Seguimos el trabajo después de responder.
+      // IMPORTANTE: hacemos TODO el trabajo primero. Vercel puede cortar la
+      // función apenas se manda la respuesta a Slack, así que si respondemos
+      // antes, el mail puede no llegar a ejecutarse.
       const result = await finalizeAccess(meta.accesoId, meta.action, comment);
       if (result && meta.response_url) await updateMessage(meta.response_url, result, meta.responderName);
       if (result && (await ownerRemainingPending(result.solicitudId, result.owner)) === 0) {
@@ -175,6 +174,9 @@ export default async function handler(req, res) {
         await sendMail(result.owner, result.ingreso, result.manager, rows);
         await notifyIT(result.owner, result.ingreso, rows);
       }
+
+      // Recién ahora respondemos a Slack para cerrar el modal.
+      res.status(200).json({ response_action: 'clear' });
       return;
     }
 
