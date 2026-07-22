@@ -18,4 +18,4 @@ export default function handler(req, res) {
   } catch (e) {
     return res.status(200).json({ crash: String(e) });
   }
-}
+} 
