@@ -167,6 +167,7 @@ async function updateMessage(responseUrl, res, responder) {
 
 async function sendMail(ownerEmail, ingreso, manager, empresa, rows) {
   const fromAlias = ALIAS_MAP[empresa] || ALIAS_MAP['Visma'];
+   console.log('empresa recibida:', empresa, '| alias elegido:', fromAlias);
   const body =
     `Onboarding: ${ingreso}\nManager: ${manager}\nEmpresa: ${empresa}\nOwner que respondió: ${ownerEmail}\n\nRespuestas:\n` +
     rows.map(r =>
