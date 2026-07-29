@@ -196,6 +196,9 @@ async function notifyIT(ownerEmail, ingreso, empresa, rows) {
 }
 
 /******************** HANDLER PRINCIPAL ********************/
+
+export const config = {maxDuration: 30,};
+
 export default async function handler(req, res) {
   try {
     if (req.method !== 'POST') { res.status(200).send('ok'); return; }
@@ -224,16 +227,27 @@ export default async function handler(req, res) {
       let comment = '';
       try { comment = payload.view.state.values['c']['txt'].value || ''; } catch (e) {}
 
-      // Trabajo pesado primero, luego respondemos a Slack para cerrar el modal.
-      const result = await finalizeAccess(meta.accesoId, meta.action, comment);
-      if (result && meta.response_url) await updateMessage(meta.response_url, result, meta.responderName);
-      if (result && (await ownerRemainingPending(result.solicitudId, result.owner)) === 0) {
-        const rows = await ownerAnsweredRows(result.solicitudId, result.owner);
-        await sendMail(result.owner, result.ingreso, result.manager, result.empresa, rows);
-        await notifyIT(result.owner, result.ingreso, result.empresa, rows);
-      }
-
+      // Respondemos a Slack YA para cerrar el modal sin error.
       res.status(200).json({ response_action: 'clear' });
+
+      // El trabajo pesado corre en background: Vercel espera que termine
+      // aunque ya respondimos (waitUntil garantiza que no se corta).
+      const workPromise = (async () => {
+        const result = await finalizeAccess(meta.accesoId, meta.action, comment);
+        if (result && meta.response_url) await updateMessage(meta.response_url, result, meta.responderName);
+        if (result && (await ownerRemainingPending(result.solicitudId, result.owner)) === 0) {
+          const rows = await ownerAnsweredRows(result.solicitudId, result.owner);
+          await sendMail(result.owner, result.ingreso, result.manager, result.empresa, rows);
+          await notifyIT(result.owner, result.ingreso, result.empresa, rows);
+        }
+      })();
+
+      // waitUntil le dice a Vercel que espere esta promesa aunque ya respondimos.
+      if (res.waitUntil) {
+        res.waitUntil(workPromise);
+      } else {
+        await workPromise; // fallback por si el entorno no soporta waitUntil
+      }
       return;
     }
 
