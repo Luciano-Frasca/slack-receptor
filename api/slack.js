@@ -13,8 +13,23 @@ const IT_SLACK_CHANNEL = process.env.IT_SLACK_CHANNEL || '';
 const MAIL_WEBHOOK_URL = process.env.MAIL_WEBHOOK_URL;
 
 const LOG_TAB = 'Log';
-// Columnas del Log (0-based): SolicitudID, AccesoID, Fecha, Ingreso, Manager, Recurso, Nivel, Owner, Estado, Comentario, FechaResp
-const COL = { SOLICITUD: 0, ACCESO: 1, FECHA: 2, INGRESO: 3, MANAGER: 4, RECURSO: 5, NIVEL: 6, OWNER: 7, ESTADO: 8, COMENTARIO: 9, FECHARESP: 10 };
+
+// Columnas del Log (0-based)
+// A: SolicitudID, B: AccesoID, C: Fecha, D: Ingreso, E: Manager,
+// F: Recurso, G: Nivel, H: Owner, I: Estado, J: Empresa, K: Comentario, L: FechaResp
+const COL = {
+  SOLICITUD: 0, ACCESO: 1, FECHA: 2, INGRESO: 3, MANAGER: 4,
+  RECURSO: 5, NIVEL: 6, OWNER: 7, ESTADO: 8, EMPRESA: 9, COMENTARIO: 10, FECHARESP: 11,
+};
+
+// Mapa Empresa -> alias de remitente
+const ALIAS_MAP = {
+  'Calipso':   'admin.it@calipso.com',
+  'Contagram': 'admin.it@contagram.com',
+  'Xubio':     'admin.it@xubio.com',
+  'Visma':     'admin.it@visma.com',
+  'LaraAI':    'admin.it@visma.com',
+};
 
 /******************** GOOGLE SHEETS (Service Account) ********************/
 function getCredentials() {
@@ -32,18 +47,27 @@ async function getSheets() {
 
 async function readLog() {
   const sheets = await getSheets();
-  const resp = await sheets.spreadsheets.values.get({ spreadsheetId: SHEET_ID, range: `${LOG_TAB}!A:K` });
+  const resp = await sheets.spreadsheets.values.get({
+    spreadsheetId: SHEET_ID,
+    range: `${LOG_TAB}!A:L`,
+  });
   return resp.data.values || [];
 }
 
 async function updateLogRow(rowIndex1Based, estado, comentario) {
   const sheets = await getSheets();
   const fecha = new Date().toLocaleString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires' });
-  await sheets.spreadsheets.values.update({
+  // Escribe Estado (I), salta Empresa (J, la pone Apps Script), Comentario (K), FechaResp (L)
+  await sheets.spreadsheets.values.batchUpdate({
     spreadsheetId: SHEET_ID,
-    range: `${LOG_TAB}!I${rowIndex1Based}:K${rowIndex1Based}`,
-    valueInputOption: 'RAW',
-    requestBody: { values: [[estado, comentario || '', fecha]] },
+    requestBody: {
+      valueInputOption: 'RAW',
+      data: [
+        { range: `${LOG_TAB}!I${rowIndex1Based}`, values: [[estado]] },
+        { range: `${LOG_TAB}!K${rowIndex1Based}`, values: [[comentario || '']] },
+        { range: `${LOG_TAB}!L${rowIndex1Based}`, values: [[fecha]] },
+      ],
+    },
   });
 }
 
@@ -58,7 +82,11 @@ async function slackApi(method, body) {
 }
 
 async function postToResponseUrl(url, body) {
-  await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
 }
 
 /******************** LÓGICA ********************/
@@ -88,9 +116,15 @@ async function finalizeAccess(accesoId, action, comment) {
       const estado = action === 'approve' ? 'APROBADO' : action === 'reject' ? 'RECHAZADO' : 'OTRO';
       await updateLogRow(i + 1, estado, comment);
       return {
-        solicitudId: data[i][COL.SOLICITUD], ingreso: data[i][COL.INGRESO], manager: data[i][COL.MANAGER],
-        recurso: data[i][COL.RECURSO], nivel: data[i][COL.NIVEL], owner: data[i][COL.OWNER],
-        estado, comentario: comment || '',
+        solicitudId: String(data[i][COL.SOLICITUD]),
+        ingreso: String(data[i][COL.INGRESO]),
+        manager: String(data[i][COL.MANAGER]),
+        recurso: String(data[i][COL.RECURSO]),
+        nivel: String(data[i][COL.NIVEL] || ''),
+        owner: String(data[i][COL.OWNER]),
+        empresa: String(data[i][COL.EMPRESA] || ''),
+        estado,
+        comentario: comment || '',
       };
     }
   }
@@ -101,7 +135,11 @@ async function ownerRemainingPending(solicitudId, owner) {
   const data = await readLog();
   let n = 0;
   for (let i = 1; i < data.length; i++) {
-    if (String(data[i][COL.SOLICITUD]) === solicitudId && String(data[i][COL.OWNER]) === owner && String(data[i][COL.ESTADO]) === 'PENDIENTE') n++;
+    if (
+      String(data[i][COL.SOLICITUD]).trim() === solicitudId.trim() &&
+      String(data[i][COL.OWNER]).trim().toLowerCase() === owner.trim().toLowerCase() &&
+      String(data[i][COL.ESTADO]).trim() === 'PENDIENTE'
+    ) n++;
   }
   return n;
 }
@@ -109,27 +147,49 @@ async function ownerRemainingPending(solicitudId, owner) {
 async function ownerAnsweredRows(solicitudId, owner) {
   const data = await readLog();
   const finales = ['APROBADO', 'RECHAZADO', 'OTRO'];
-  return data.filter((r, idx) => idx > 0 && String(r[COL.SOLICITUD]) === solicitudId && String(r[COL.OWNER]) === owner && finales.includes(String(r[COL.ESTADO])));
+  return data.filter((r, idx) =>
+    idx > 0 &&
+    String(r[COL.SOLICITUD]).trim() === solicitudId.trim() &&
+    String(r[COL.OWNER]).trim().toLowerCase() === owner.trim().toLowerCase() &&
+    finales.includes(String(r[COL.ESTADO]).trim())
+  );
 }
 
 async function updateMessage(responseUrl, res, responder) {
   const icono = res.estado === 'APROBADO' ? '✅ Aprobado' : res.estado === 'RECHAZADO' ? '❌ Rechazado' : '✏️ Otro';
-  const txt = `*Solicitud de acceso — ${icono}*\nIngreso: *${res.ingreso}*\nRecurso: *${res.recurso}*${res.nivel ? ` (nivel: ${res.nivel})` : ''}\nRespondido por: ${responder}${res.comentario ? `\nComentario: ${res.comentario}` : ''}`;
-  await postToResponseUrl(responseUrl, { replace_original: true, text: txt, blocks: [{ type: 'section', text: { type: 'mrkdwn', text: txt } }] });
-}
-
-async function sendMail(ownerEmail, ingreso, manager, rows) {
-  const body = `Onboarding: ${ingreso}\nManager: ${manager}\nOwner que respondió: ${ownerEmail}\n\nRespuestas:\n` +
-    rows.map(r => `• ${r[COL.RECURSO]}${r[COL.NIVEL] ? ` (${r[COL.NIVEL]})` : ''}: ${r[COL.ESTADO]}${r[COL.COMENTARIO] ? ` — ${r[COL.COMENTARIO]}` : ''}`).join('\n');
-  await fetch(MAIL_WEBHOOK_URL, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ key: REQUEST_KEY, to: SUPPORT_EMAIL, subject: `Accesos ${ingreso} — respuestas de ${ownerEmail}`, body }),
+  const txt = `*Solicitud de acceso — ${icono}*\nEmpresa: *${res.empresa}*\nIngreso: *${res.ingreso}*\nRecurso: *${res.recurso}*${res.nivel ? ` (nivel: ${res.nivel})` : ''}\nRespondido por: ${responder}${res.comentario ? `\nComentario: ${res.comentario}` : ''}`;
+  await postToResponseUrl(responseUrl, {
+    replace_original: true,
+    text: txt,
+    blocks: [{ type: 'section', text: { type: 'mrkdwn', text: txt } }],
   });
 }
 
-async function notifyIT(ownerEmail, ingreso, rows) {
+async function sendMail(ownerEmail, ingreso, manager, empresa, rows) {
+  const fromAlias = ALIAS_MAP[empresa] || ALIAS_MAP['Visma'];
+  const body =
+    `Onboarding: ${ingreso}\nManager: ${manager}\nEmpresa: ${empresa}\nOwner que respondió: ${ownerEmail}\n\nRespuestas:\n` +
+    rows.map(r =>
+      `• ${r[COL.RECURSO]}${r[COL.NIVEL] ? ` (${r[COL.NIVEL]})` : ''}: ${r[COL.ESTADO]}${r[COL.COMENTARIO] ? ` — ${r[COL.COMENTARIO]}` : ''}`
+    ).join('\n') +
+    '\n\n(Enviado automáticamente por Aprobaciones IT)';
+
+  await fetch(MAIL_WEBHOOK_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      key: REQUEST_KEY,
+      to: SUPPORT_EMAIL,
+      from: fromAlias,
+      subject: `[${empresa}] Accesos ${ingreso} — respuestas de ${ownerEmail}`,
+      body,
+    }),
+  });
+}
+
+async function notifyIT(ownerEmail, ingreso, empresa, rows) {
   if (!IT_SLACK_CHANNEL) return;
-  const txt = `*Respuestas recibidas* para *${ingreso}* de ${ownerEmail}:\n` +
+  const txt = `*[${empresa}] Respuestas recibidas* para *${ingreso}* de ${ownerEmail}:\n` +
     rows.map(r => `• ${r[COL.RECURSO]}: ${r[COL.ESTADO]}${r[COL.COMENTARIO] ? ` (${r[COL.COMENTARIO]})` : ''}`).join('\n');
   await slackApi('chat.postMessage', { channel: IT_SLACK_CHANNEL, text: txt });
 }
@@ -143,7 +203,6 @@ export default async function handler(req, res) {
     const key = url.searchParams.get('key');
     if (key !== REQUEST_KEY) { res.status(200).send(''); return; }
 
-    // El body llega urlencoded con un campo "payload". Vercel lo parsea en req.body.
     const payload = JSON.parse(req.body.payload);
 
     if (payload.type === 'block_actions') {
@@ -164,18 +223,15 @@ export default async function handler(req, res) {
       let comment = '';
       try { comment = payload.view.state.values['c']['txt'].value || ''; } catch (e) {}
 
-      // IMPORTANTE: hacemos TODO el trabajo primero. Vercel puede cortar la
-      // función apenas se manda la respuesta a Slack, así que si respondemos
-      // antes, el mail puede no llegar a ejecutarse.
+      // Trabajo pesado primero, luego respondemos a Slack para cerrar el modal.
       const result = await finalizeAccess(meta.accesoId, meta.action, comment);
       if (result && meta.response_url) await updateMessage(meta.response_url, result, meta.responderName);
       if (result && (await ownerRemainingPending(result.solicitudId, result.owner)) === 0) {
         const rows = await ownerAnsweredRows(result.solicitudId, result.owner);
-        await sendMail(result.owner, result.ingreso, result.manager, rows);
-        await notifyIT(result.owner, result.ingreso, rows);
+        await sendMail(result.owner, result.ingreso, result.manager, result.empresa, rows);
+        await notifyIT(result.owner, result.ingreso, result.empresa, rows);
       }
 
-      // Recién ahora respondemos a Slack para cerrar el modal.
       res.status(200).json({ response_action: 'clear' });
       return;
     }
