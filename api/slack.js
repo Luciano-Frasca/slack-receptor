@@ -36,13 +36,19 @@ function getCredentials() {
   return JSON.parse(process.env.GOOGLE_CREDENTIALS || '{}');
 }
 
+// Cacheado a nivel de módulo: en invocaciones "warm" de Vercel se reutiliza
+// la misma instancia y evitamos volver a autenticar contra Google cada vez.
+let cachedSheetsClient = null;
+
 async function getSheets() {
+  if (cachedSheetsClient) return cachedSheetsClient;
   const auth = new google.auth.GoogleAuth({
     credentials: getCredentials(),
     scopes: ['https://www.googleapis.com/auth/spreadsheets'],
   });
   const client = await auth.getClient();
-  return google.sheets({ version: 'v4', auth: client });
+  cachedSheetsClient = google.sheets({ version: 'v4', auth: client });
+  return cachedSheetsClient;
 }
 
 async function readLog() {
@@ -109,12 +115,15 @@ function openCommentModal(triggerId, meta) {
   return slackApi('views.open', { trigger_id: triggerId, view });
 }
 
-async function finalizeAccess(accesoId, action, comment) {
-  const data = await readLog();
+async function finalizeAccess(data, accesoId, action, comment) {
   for (let i = 1; i < data.length; i++) {
     if (String(data[i][COL.ACCESO]) === accesoId) {
       const estado = action === 'approve' ? 'APROBADO' : action === 'reject' ? 'RECHAZADO' : 'OTRO';
       await updateLogRow(i + 1, estado, comment);
+      // Reflejamos el update en la copia en memoria para que los cálculos
+      // que siguen (pendientes/respondidas) no necesiten releer el sheet.
+      data[i][COL.ESTADO] = estado;
+      data[i][COL.COMENTARIO] = comment || '';
       return {
         solicitudId: String(data[i][COL.SOLICITUD]),
         ingreso: String(data[i][COL.INGRESO]),
@@ -131,8 +140,7 @@ async function finalizeAccess(accesoId, action, comment) {
   return null;
 }
 
-async function ownerRemainingPending(solicitudId, owner) {
-  const data = await readLog();
+function ownerRemainingPending(data, solicitudId, owner) {
   let n = 0;
   for (let i = 1; i < data.length; i++) {
     if (
@@ -144,8 +152,7 @@ async function ownerRemainingPending(solicitudId, owner) {
   return n;
 }
 
-async function ownerAnsweredRows(solicitudId, owner) {
-  const data = await readLog();
+function ownerAnsweredRows(data, solicitudId, owner) {
   const finales = ['APROBADO', 'RECHAZADO', 'OTRO'];
   return data.filter((r, idx) =>
     idx > 0 &&
@@ -208,7 +215,7 @@ export default async function handler(req, res) {
     if (key !== REQUEST_KEY) { res.status(200).send(''); return; }
 
     const payload = JSON.parse(req.body.payload);
-
+    
     if (payload.type === 'block_actions') {
       const action = payload.actions[0];
       const meta = {
@@ -233,10 +240,11 @@ export default async function handler(req, res) {
       // El trabajo pesado corre en background: Vercel espera que termine
       // aunque ya respondimos (waitUntil garantiza que no se corta).
       const workPromise = (async () => {
-        const result = await finalizeAccess(meta.accesoId, meta.action, comment);
+        const data = await readLog();
+        const result = await finalizeAccess(data, meta.accesoId, meta.action, comment);
         if (result && meta.response_url) await updateMessage(meta.response_url, result, meta.responderName);
-        if (result && (await ownerRemainingPending(result.solicitudId, result.owner)) === 0) {
-          const rows = await ownerAnsweredRows(result.solicitudId, result.owner);
+        if (result && ownerRemainingPending(data, result.solicitudId, result.owner) === 0) {
+          const rows = ownerAnsweredRows(data, result.solicitudId, result.owner);
           await sendMail(result.owner, result.ingreso, result.manager, result.empresa, rows);
           await notifyIT(result.owner, result.ingreso, result.empresa, rows);
         }
