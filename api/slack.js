@@ -64,7 +64,7 @@ async function updateLogRow(rowIndex1Based, estado, comentario) {
   const sheets = await getSheets();
   const fecha = new Date().toLocaleString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires' });
   // Escribe Estado (I), salta Empresa (J, la pone Apps Script), Comentario (K), FechaResp (L)
-  await sheets.spreadsheets.values.batchUpdate({
+  const resp = await sheets.spreadsheets.values.batchUpdate({
     spreadsheetId: SHEET_ID,
     requestBody: {
       valueInputOption: 'RAW',
@@ -75,6 +75,7 @@ async function updateLogRow(rowIndex1Based, estado, comentario) {
       ],
     },
   });
+  console.log('updateLogRow: fila=', rowIndex1Based, 'estado=', estado, 'responses=', JSON.stringify(resp.data.responses));
 }
 
 /******************** SLACK API ********************/
@@ -88,11 +89,13 @@ async function slackApi(method, body) {
 }
 
 async function postToResponseUrl(url, body) {
-  await fetch(url, {
+  const resp = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
+  const text = await resp.text();
+  console.log('postToResponseUrl: status=', resp.status, 'body=', text);
 }
 
 /******************** LÓGICA ********************/
@@ -116,8 +119,10 @@ function openCommentModal(triggerId, meta) {
 }
 
 async function finalizeAccess(data, accesoId, action, comment) {
+  console.log('finalizeAccess: buscando accesoId=', JSON.stringify(accesoId), 'entre', data.length - 1, 'filas');
   for (let i = 1; i < data.length; i++) {
     if (String(data[i][COL.ACCESO]) === accesoId) {
+      console.log('finalizeAccess: match en fila', i + 1);
       const estado = action === 'approve' ? 'APROBADO' : action === 'reject' ? 'RECHAZADO' : 'OTRO';
       await updateLogRow(i + 1, estado, comment);
       // Reflejamos el update en la copia en memoria para que los cálculos
@@ -137,6 +142,7 @@ async function finalizeAccess(data, accesoId, action, comment) {
       };
     }
   }
+  console.log('finalizeAccess: NO se encontro ninguna fila con AccesoID=', JSON.stringify(accesoId), '- valores presentes:', data.slice(1).map(r => r[COL.ACCESO]));
   return null;
 }
 
@@ -240,13 +246,24 @@ export default async function handler(req, res) {
       // El trabajo pesado corre en background: Vercel espera que termine
       // aunque ya respondimos (waitUntil garantiza que no se corta).
       const workPromise = (async () => {
-        const data = await readLog();
-        const result = await finalizeAccess(data, meta.accesoId, meta.action, comment);
-        if (result && meta.response_url) await updateMessage(meta.response_url, result, meta.responderName);
-        if (result && ownerRemainingPending(data, result.solicitudId, result.owner) === 0) {
-          const rows = ownerAnsweredRows(data, result.solicitudId, result.owner);
-          await sendMail(result.owner, result.ingreso, result.manager, result.empresa, rows);
-          await notifyIT(result.owner, result.ingreso, result.empresa, rows);
+        try {
+          console.log('workPromise: start meta=', JSON.stringify(meta));
+          const data = await readLog();
+          console.log('workPromise: readLog ok, filas=', data.length);
+          const result = await finalizeAccess(data, meta.accesoId, meta.action, comment);
+          console.log('workPromise: finalizeAccess result=', JSON.stringify(result));
+          if (result && meta.response_url) {
+            await updateMessage(meta.response_url, result, meta.responderName);
+            console.log('workPromise: updateMessage OK');
+          }
+          if (result && ownerRemainingPending(data, result.solicitudId, result.owner) === 0) {
+            const rows = ownerAnsweredRows(data, result.solicitudId, result.owner);
+            await sendMail(result.owner, result.ingreso, result.manager, result.empresa, rows);
+            await notifyIT(result.owner, result.ingreso, result.empresa, rows);
+            console.log('workPromise: mail + notifyIT OK');
+          }
+        } catch (e) {
+          console.error('workPromise ERROR:', e && e.stack ? e.stack : e);
         }
       })();
 
