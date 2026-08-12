@@ -188,7 +188,11 @@ async function sendMail(ownerEmail, ingreso, manager, empresa, rows) {
     ).join('\n') +
     '\n\n(Enviado automáticamente por Aprobaciones IT)';
 
-  await fetch(MAIL_WEBHOOK_URL, {
+  if (!MAIL_WEBHOOK_URL) {
+    console.error('sendMail: MAIL_WEBHOOK_URL no esta configurada, no se puede enviar el mail');
+    return;
+  }
+  const resp = await fetch(MAIL_WEBHOOK_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -199,6 +203,11 @@ async function sendMail(ownerEmail, ingreso, manager, empresa, rows) {
       body,
     }),
   });
+  const text = await resp.text();
+  console.log('sendMail: status=', resp.status, 'body=', text);
+  if (!resp.ok) {
+    console.error('sendMail: el webhook de Apps Script respondio con error, status=', resp.status);
+  }
 }
 
 async function notifyIT(ownerEmail, ingreso, empresa, rows) {
