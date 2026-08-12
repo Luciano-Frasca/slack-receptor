@@ -265,8 +265,16 @@ export default async function handler(req, res) {
             await updateMessage(meta.response_url, result, meta.responderName);
             console.log('workPromise: updateMessage OK');
           }
-          if (result && ownerRemainingPending(data, result.solicitudId, result.owner) === 0) {
-            const rows = ownerAnsweredRows(data, result.solicitudId, result.owner);
+          // Releemos el Log recien aca (no usamos la foto del inicio del
+          // request) porque, si varias aprobaciones del mismo owner llegan
+          // casi al mismo tiempo, cada invocacion es un proceso separado y
+          // la foto vieja no refleja lo que las demas ya escribieron. Sin
+          // este re-read, ninguna invocacion se ve a si misma como "la
+          // ultima pendiente" y el mail nunca se dispara.
+          const freshData = result ? await readLog() : data;
+          console.log('workPromise: re-read para chequeo de pendientes, filas=', freshData.length);
+          if (result && ownerRemainingPending(freshData, result.solicitudId, result.owner) === 0) {
+            const rows = ownerAnsweredRows(freshData, result.solicitudId, result.owner);
             await sendMail(result.owner, result.ingreso, result.manager, result.empresa, rows);
             await notifyIT(result.owner, result.ingreso, result.empresa, rows);
             console.log('workPromise: mail + notifyIT OK');
